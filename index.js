@@ -17,27 +17,27 @@
 
 import express from "express";
 
-const {
-  NEXTCLOUD_URL,
-  NC_USER,
-  NC_APP_PASSWORD,
-  TABLE_ID = "2",
-  CACHE_TTL_SECONDS = "120",
-  PORT = "3000",
-} = process.env;
+// Nettoyage strict des variables (supprime les guillemets et espaces invisibles de Coolify)
+const baseUrl = (process.env.NEXTCLOUD_URL || "").replace(/['"]/g, '').trim().replace(/\/$/, '');
+const user = (process.env.NC_USER || "").replace(/['"]/g, '').trim();
+const pass = (process.env.NC_APP_PASSWORD || "").replace(/['"]/g, '').trim();
+const tableId = (process.env.TABLE_ID || "2").replace(/['"]/g, '').trim();
+const ttl = (process.env.CACHE_TTL_SECONDS || "120").replace(/['"]/g, '').trim();
+const port = (process.env.PORT || "3000").replace(/['"]/g, '').trim();
 
-if (!NEXTCLOUD_URL || !NC_USER || !NC_APP_PASSWORD) {
+if (!baseUrl || !user || !pass) {
   console.error("Variables d'environnement manquantes : NEXTCLOUD_URL, NC_USER, NC_APP_PASSWORD");
   process.exit(1);
 }
 
-const AUTH_HEADER = "Basic " + Buffer.from(`${NC_USER}:${NC_APP_PASSWORD}`).toString("base64");
+const AUTH_HEADER = "Basic " + Buffer.from(`${user}:${pass}`).toString("base64");
+
+// Copie conforme des en-têtes de la commande curl
 const BASE_HEADERS = {
   "OCS-APIRequest": "true",
-  Accept: "application/json",
-  Authorization: AUTH_HEADER,
-  "User-Agent": "SlatCalendarApp/1.0", // Rassure le pare-feu anti-bot
-  "Host": "cloud.slat.info"            // Simule une requête venant du bon domaine public
+  "Accept": "*/*",
+  "Authorization": AUTH_HEADER,
+  "User-Agent": "curl/7.81.0"
 };
 
 // IDs de colonnes fixes (table Événements SLAT id:2)
