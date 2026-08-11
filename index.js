@@ -36,7 +36,8 @@ const BASE_HEADERS = {
   "OCS-APIRequest": "true",
   Accept: "application/json",
   Authorization: AUTH_HEADER,
-  "User-Agent": "Mozilla/5.0 (SLAT-Calendar-App)"
+  "User-Agent": "SlatCalendarApp/1.0", // Rassure le pare-feu anti-bot
+  "Host": "cloud.slat.info"            // Simule une requête venant du bon domaine public
 };
 
 // IDs de colonnes fixes (table Événements SLAT id:2)
