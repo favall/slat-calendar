@@ -70,7 +70,10 @@ let cache = { data: null, fetchedAt: 0 };
 const TTL_MS = parseInt(CACHE_TTL_SECONDS, 10) * 1000;
 
 async function fetchJSON(path) {
-  const res = await fetch(`${NEXTCLOUD_URL}${path}`, { headers: BASE_HEADERS });
+  const fullUrl = `${baseUrl}${path}`;
+  console.log(`📡 Tentative de connexion à : ${fullUrl}`); 
+  
+  const res = await fetch(fullUrl, { headers: BASE_HEADERS });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`Erreur API (${res.status}) sur ${path} : ${body}`);
