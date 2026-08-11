@@ -36,6 +36,7 @@ const BASE_HEADERS = {
   "OCS-APIRequest": "true",
   Accept: "application/json",
   Authorization: AUTH_HEADER,
+  "User-Agent": "Mozilla/5.0 (SLAT-Calendar-App)"
 };
 
 // IDs de colonnes fixes (table Événements SLAT id:2)
