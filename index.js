@@ -17,13 +17,15 @@
 
 import express from "express";
 
-// Nettoyage strict des variables (supprime les guillemets et espaces invisibles de Coolify)
+// 1. Nettoyage strict des variables (supprime les guillemets et espaces invisibles de Coolify)
 const baseUrl = (process.env.NEXTCLOUD_URL || "").replace(/['"]/g, '').trim().replace(/\/$/, '');
 const user = (process.env.NC_USER || "").replace(/['"]/g, '').trim();
 const pass = (process.env.NC_APP_PASSWORD || "").replace(/['"]/g, '').trim();
-const tableId = (process.env.TABLE_ID || "2").replace(/['"]/g, '').trim();
-const ttl = (process.env.CACHE_TTL_SECONDS || "120").replace(/['"]/g, '').trim();
-const port = (process.env.PORT || "3000").replace(/['"]/g, '').trim();
+
+// On garde les noms originaux en majuscules pour ne pas casser le reste du code
+const TABLE_ID = (process.env.TABLE_ID || "2").replace(/['"]/g, '').trim();
+const CACHE_TTL_SECONDS = (process.env.CACHE_TTL_SECONDS || "120").replace(/['"]/g, '').trim();
+const PORT = (process.env.PORT || "3000").replace(/['"]/g, '').trim();
 
 if (!baseUrl || !user || !pass) {
   console.error("Variables d'environnement manquantes : NEXTCLOUD_URL, NC_USER, NC_APP_PASSWORD");
@@ -32,12 +34,12 @@ if (!baseUrl || !user || !pass) {
 
 const AUTH_HEADER = "Basic " + Buffer.from(`${user}:${pass}`).toString("base64");
 
-// Copie conforme des en-têtes de la commande curl
+// 2. On se fait passer EXACTEMENT pour la commande curl qui a fonctionné
 const BASE_HEADERS = {
   "OCS-APIRequest": "true",
   "Accept": "*/*",
   "Authorization": AUTH_HEADER,
-  "User-Agent": "curl/7.81.0"
+  "User-Agent": "curl/7.81.0" 
 };
 
 // IDs de colonnes fixes (table Événements SLAT id:2)
