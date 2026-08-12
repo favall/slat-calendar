@@ -35,7 +35,7 @@ if (!baseUrl || !user || !pass) {
 const AUTH_HEADER = "Basic " + Buffer.from(`${user}:${pass}`).toString("base64");
 
 // 2. Fonction fetch qui contourne Node.js en utilisant wget (natif sous Alpine Linux)
-function fetchJSON(path) {
+async function fetchJSON(path) {
   const fullUrl = `${baseUrl}${path}`;
   console.log(`📡 Tentative via WGET sur : ${fullUrl}`); 
   
@@ -80,44 +80,6 @@ function colorForStatus(statut) {
 let cache = { data: null, fetchedAt: 0 };
 const TTL_MS = parseInt(CACHE_TTL_SECONDS, 10) * 1000;
 
-async function fetchJSON(path) {
-  const fullUrl = `${baseUrl}${path}`;
-  console.log(`📡 Tentative de connexion (via HTTP natif) à : ${fullUrl}`);
-
-  return new Promise((resolve, reject) => {
-    // On force Nextcloud à croire qu'on vient du web (contourne les Trusted Domains)
-    const options = {
-      headers: {
-        "OCS-APIRequest": "true",
-        "Accept": "application/json",
-        "Authorization": AUTH_HEADER,
-        "User-Agent": "curl/7.81.0",
-        "Host": "cloud.slat.info",            // Bypass des Trusted Domains
-        "X-Forwarded-Proto": "https"          // Évite que Nextcloud nous redirige (302)
-      }
-    };
-
-    const client = fullUrl.startsWith("https") ? https : http;
-    
-    const req = client.get(fullUrl, options, (res) => {
-      let data = '';
-      res.on('data', chunk => { data += chunk; });
-      res.on('end', () => {
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          try {
-            resolve(JSON.parse(data));
-          } catch (e) {
-            reject(new Error(`JSON invalide: ${data}`));
-          }
-        } else {
-          reject(new Error(`HTTP ${res.statusCode} : ${data}`));
-        }
-      });
-    });
-
-    req.on('error', (err) => reject(new Error(`Erreur réseau: ${err.message}`)));
-  });
-}
 function cellValue(row, colId) {
   const cell = row.data?.find(c => c.columnId === colId);
   if (!cell) return null;
