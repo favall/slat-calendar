@@ -1,14 +1,6 @@
 // Calendrier annuel SLAT — généré depuis Nextcloud Tables
-// Colonnes mappées sur la table "Événements SLAT" (id:2) :
-//   5  → Nom de l'évenement
-//   8  → Date début
-//   9  → Date de fin
-//   17 → Status (sélection : A préparer / Infos envoyées / Publié / Réalisé)
-//   16 → Échéance com CSE
-//   21 → Saison
-//
 // Variables d'environnement requises :
-//   NEXTCLOUD_URL      ex: https://cloud.slat.info
+//   NEXTCLOUD_URL      ex: http://nextcloud-app-fk8gwk4sskw044kg4wkcckc0:80
 //   NC_USER            ex: admin
 //   NC_APP_PASSWORD    mot de passe d'application Nextcloud
 //   TABLE_ID           2
@@ -16,7 +8,6 @@
 //   PORT               port d'écoute (défaut: 3000)
 
 import express from "express";
-import { execSync } from "child_process";
 
 // 1. Nettoyage strict des variables
 const baseUrl = (process.env.NEXTCLOUD_URL || "").replace(/['"]/g, '').trim().replace(/\/$/, '');
@@ -34,21 +25,23 @@ if (!baseUrl || !user || !pass) {
 
 const AUTH_HEADER = "Basic " + Buffer.from(`${user}:${pass}`).toString("base64");
 
-// 2. Fonction fetch qui contourne Node.js en utilisant wget (natif sous Alpine Linux)
+const BASE_HEADERS = {
+  "OCS-APIRequest": "true",
+  "Accept": "application/json",
+  "Authorization": AUTH_HEADER
+};
+
+// 2. Fonction fetch native
 async function fetchJSON(path) {
   const fullUrl = `${baseUrl}${path}`;
-  console.log(`📡 Tentative via WGET sur : ${fullUrl}`); 
+  console.log(`📡 Connexion à : ${fullUrl}`); 
   
-  try {
-    // On mime exactement un comportement standard (curl/wget) avec falsification du domaine
-    const cmd = `wget -qO- --header="OCS-APIRequest: true" --header="Accept: application/json" --header="Authorization: ${AUTH_HEADER}" --header="Host: cloud.slat.info" "${fullUrl}"`;
-    
-    // On exécute la commande de manière synchrone
-    const stdout = execSync(cmd, { encoding: 'utf8' });
-    return JSON.parse(stdout);
-  } catch (err) {
-    throw new Error(`Nextcloud a rejeté la requête WGET (Probablement 500). Erreur: ${err.message}`);
+  const res = await fetch(fullUrl, { headers: BASE_HEADERS });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Erreur API (${res.status}) sur ${path} : ${body}`);
   }
+  return res.json();
 }
 
 // IDs de colonnes fixes (table Événements SLAT id:2)
