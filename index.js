@@ -8,6 +8,7 @@
 //   PORT               port d'écoute (défaut: 3000)
 
 import express from "express";
+import { execSync } from "child_process";
 
 // 1. Nettoyage strict des variables
 const baseUrl = (process.env.NEXTCLOUD_URL || "").replace(/['"]/g, '').trim().replace(/\/$/, '');
@@ -25,23 +26,18 @@ if (!baseUrl || !user || !pass) {
 
 const AUTH_HEADER = "Basic " + Buffer.from(`${user}:${pass}`).toString("base64");
 
-const BASE_HEADERS = {
-  "OCS-APIRequest": "true",
-  "Accept": "application/json",
-  "Authorization": AUTH_HEADER
-};
-
-// 2. Fonction fetch native
+// 2. On utilise CURL natif qui a fait ses preuves !
 async function fetchJSON(path) {
   const fullUrl = `${baseUrl}${path}`;
-  console.log(`📡 Connexion à : ${fullUrl}`); 
+  console.log(`📡 Connexion (CURL) à : ${fullUrl}`); 
   
-  const res = await fetch(fullUrl, { headers: BASE_HEADERS });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Erreur API (${res.status}) sur ${path} : ${body}`);
+  try {
+    const cmd = `curl -s -H "OCS-APIRequest: true" -H "Accept: application/json" -H "Authorization: ${AUTH_HEADER}" "${fullUrl}"`;
+    const stdout = execSync(cmd, { encoding: 'utf8' });
+    return JSON.parse(stdout);
+  } catch (err) {
+    throw new Error(`Erreur CURL API: ${err.message}`);
   }
-  return res.json();
 }
 
 // IDs de colonnes fixes (table Événements SLAT id:2)
