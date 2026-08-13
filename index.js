@@ -85,7 +85,7 @@ async function fetchEvents() {
   const now = Date.now();
   if (cache.data && now - cache.fetchedAt < TTL_MS) return cache.data;
 
-  const rows = await fetchJSON(`/index.php/apps/tables/api/1/tables/${TABLE_ID}/rows`);
+  const rows = await fetchJSON(`/apps/tables/api/1/tables/${TABLE_ID}/rows`);
 
   const events = rows
     .map(row => ({
