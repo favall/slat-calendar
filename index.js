@@ -1,4 +1,4 @@
-// Calendrier annuel SLAT — généré depuis Nextcloud Tables
+// Passerelle Nextcloud Tables -> Flux ICS (iCalendar)
 // Variables d'environnement requises :
 //   NEXTCLOUD_URL      ex: http://nextcloud-app-fk8gwk4sskw044kg4wkcckc0:80
 //   NC_USER            ex: admin
@@ -10,11 +10,10 @@
 import express from "express";
 import { execSync } from "child_process";
 
-// 1. Nettoyage strict des variables
+// 1. Nettoyage des variables
 const baseUrl = (process.env.NEXTCLOUD_URL || "").replace(/['"]/g, '').trim().replace(/\/$/, '');
 const user = (process.env.NC_USER || "").replace(/['"]/g, '').trim();
 const pass = (process.env.NC_APP_PASSWORD || "").replace(/['"]/g, '').trim();
-
 const TABLE_ID = (process.env.TABLE_ID || "2").replace(/['"]/g, '').trim();
 const CACHE_TTL_SECONDS = (process.env.CACHE_TTL_SECONDS || "120").replace(/['"]/g, '').trim();
 const PORT = (process.env.PORT || "3000").replace(/['"]/g, '').trim();
@@ -26,10 +25,10 @@ if (!baseUrl || !user || !pass) {
 
 const AUTH_HEADER = "Basic " + Buffer.from(`${user}:${pass}`).toString("base64");
 
-// 2. On utilise CURL natif qui a fait ses preuves !
+// 2. Fetcher via CURL (Infaillible)
 async function fetchJSON(path) {
   const fullUrl = `${baseUrl}${path}`;
-  console.log(`📡 Connexion (CURL) à : ${fullUrl}`); 
+  console.log(`📡 Génération du calendrier sollicitée. Connexion à Tables...`); 
   
   try {
     const cmd = `curl -s -H "OCS-APIRequest: true" -H "Accept: application/json" -H "Authorization: ${AUTH_HEADER}" "${fullUrl}"`;
@@ -40,32 +39,20 @@ async function fetchJSON(path) {
   }
 }
 
-// IDs de colonnes fixes (table Événements SLAT id:2)
+// 3. IDs de colonnes
 const COL = {
   NOM: 5,
   DATE_DEBUT: 8,
   DATE_FIN: 9,
   STATUS: 17,
   ECHEANCE_CSE: 16,
+  DEBUT_COM: 36,
+  FIN_COM: 37,
+  DEBUT_INSCRIPTIONS: 33,
+  FIN_INSCRIPTIONS: 34,
   SAISON: 21,
 };
 
-// Couleurs par statut — labels tels que définis dans Tables
-const STATUS_COLORS = {
-  "a préparer":    { bg: "#f6b26b", text: "#7a4a00" },  // orange
-  "infos envoyées": { bg: "#9fc5e8", text: "#1a3a5c" }, // bleu clair
-  "publié":        { bg: "#6fa8dc", text: "#0a2744" },  // bleu
-  "réalisé":       { bg: "#93c47d", text: "#1a4a00" },  // vert
-  "default":       { bg: "#e0e0e0", text: "#444444" },  // gris
-};
-
-function colorForStatus(statut) {
-  if (!statut) return STATUS_COLORS.default;
-  const key = statut.trim().toLowerCase();
-  return STATUS_COLORS[key] || STATUS_COLORS.default;
-}
-
-// --- Cache simple en mémoire -------------------------------------------
 let cache = { data: null, fetchedAt: 0 };
 const TTL_MS = parseInt(CACHE_TTL_SECONDS, 10) * 1000;
 
@@ -74,18 +61,18 @@ function cellValue(row, colId) {
   if (!cell) return null;
   const v = cell.value;
   if (v === null || v === undefined || v === "") return null;
-  // Colonne usergroup : retourne le displayName du premier item
   if (Array.isArray(v) && v.length > 0 && typeof v[0] === "object") {
     return v.map(u => u.displayName || u.id).join(", ");
   }
   return String(v);
 }
 
+// Récupération des données brutes
 async function fetchEvents() {
   const now = Date.now();
   if (cache.data && now - cache.fetchedAt < TTL_MS) return cache.data;
 
-  const rows = await fetchJSON(`/apps/tables/api/1/tables/${TABLE_ID}/rows`);
+  const rows = await fetchJSON(`/index.php/apps/tables/api/1/tables/${TABLE_ID}/rows`);
 
   const events = rows
     .map(row => ({
@@ -95,6 +82,10 @@ async function fetchEvents() {
       dateFin: cellValue(row, COL.DATE_FIN),
       statut: cellValue(row, COL.STATUS),
       echeanceCSE: cellValue(row, COL.ECHEANCE_CSE),
+      debutCom: cellValue(row, COL.DEBUT_COM),
+      finCom: cellValue(row, COL.FIN_COM),
+      debutInscriptions: cellValue(row, COL.DEBUT_INSCRIPTIONS),
+      finInscriptions: cellValue(row, COL.FIN_INSCRIPTIONS),
       saison: cellValue(row, COL.SAISON),
     }))
     .filter(e => e.dateDebut);
@@ -103,200 +94,87 @@ async function fetchEvents() {
   return events;
 }
 
-// --- Grille annuelle -----------------------------------------------------
-const MOIS = [
-  "Jan", "Fév", "Mar", "Avr", "Mai", "Juin",
-  "Juil", "Août", "Sep", "Oct", "Nov", "Déc",
-];
-const MOIS_LONG = [
-  "Janvier", "Février", "Mars", "Avril", "Mai", "Juin",
-  "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre",
-];
+// 4. Générateur ICS (iCalendar)
+function generateICS(events) {
+  let ics = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//SLAT//Calendrier des Evenements//FR",
+    "CALSCALE:GREGORIAN",
+    "X-WR-CALNAME:Événements SLAT" // Nom de l'agenda
+  ];
 
-function daysInMonth(year, m) {
-  return new Date(year, m + 1, 0).getDate();
-}
+  // Horodatage actuel (exigé par la norme ICS)
+  const nowStamp = new Date().toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
 
-function parseDate(str) {
-  if (!str) return null;
-  // Formats attendus : "YYYY-MM-DD" ou "YYYY-MM-DD HH:mm:ss"
-  const d = new Date(str.substring(0, 10));
-  return isNaN(d.getTime()) ? null : d;
-}
-
-// Retourne toutes les dates couvertes par un événement (début → fin inclus)
-function eventDates(ev, year) {
-  const start = parseDate(ev.dateDebut);
-  if (!start) return [];
-  const end = parseDate(ev.dateFin) || start;
-  const dates = [];
-  const cur = new Date(start);
-  while (cur <= end) {
-    if (cur.getFullYear() === year) {
-      dates.push({ month: cur.getMonth(), day: cur.getDate() });
+  events.forEach(e => {
+    if (!e.dateDebut) return;
+    
+    ics.push("BEGIN:VEVENT");
+    ics.push(`UID:slat-event-${e.id}@slat.info`);
+    ics.push(`DTSTAMP:${nowStamp}`);
+    
+    // Formatage des dates pour événements sur la journée entière (YYYYMMDD)
+    const start = e.dateDebut.substring(0, 10).replace(/-/g, "");
+    ics.push(`DTSTART;VALUE=DATE:${start}`);
+    
+    if (e.dateFin) {
+      // Dans ICS, la date de fin d'un événement "All-day" est exclusive. Il faut ajouter 1 jour.
+      const dEnd = new Date(e.dateFin.substring(0, 10));
+      dEnd.setDate(dEnd.getDate() + 1);
+      const end = dEnd.toISOString().substring(0, 10).replace(/-/g, "");
+      ics.push(`DTEND;VALUE=DATE:${end}`);
+    } else {
+      ics.push(`DTEND;VALUE=DATE:${start}`); 
     }
-    cur.setDate(cur.getDate() + 1);
-  }
-  return dates;
+
+    ics.push(`SUMMARY:${e.nom}`);
+    
+    // Construction de la description (qui apparaîtra quand on cliquera sur l'événement)
+    // En ICS, les retours à la ligne sont des littéraux "\n"
+    let desc = `Statut : ${e.statut || 'Non défini'}\\n`;
+    if (e.saison) desc += `Saison : ${e.saison}\\n`;
+    if (e.debutInscriptions) desc += `Inscriptions : Du ${e.debutInscriptions.substring(0, 10)}`;
+    if (e.finInscriptions) desc += ` au ${e.finInscriptions.substring(0, 10)}`;
+    desc += `\\n`;
+    if (e.debutCom) desc += `Communication : Du ${e.debutCom.substring(0, 10)}`;
+    if (e.finCom) desc += ` au ${e.finCom.substring(0, 10)}`;
+    desc += `\\n`;
+    if (e.echeanceCSE) desc += `Échéance CSE : ${e.echeanceCSE.substring(0, 10)}\\n`;
+    
+    ics.push(`DESCRIPTION:${desc}`);
+    ics.push("END:VEVENT");
+  });
+
+  ics.push("END:VCALENDAR");
+  
+  // Le standard ICS exige des fins de ligne spécifiques (CRLF)
+  return ics.join("\r\n");
 }
 
-function buildGrid(year, events) {
-  // grid[month][day] = [event, ...]
-  const grid = Array.from({ length: 12 }, () => ({}));
-  for (const ev of events) {
-    for (const { month, day } of eventDates(ev, year)) {
-      if (!grid[month][day]) grid[month][day] = [];
-      grid[month][day].push(ev);
-    }
-  }
-  return grid;
-}
-
-function esc(str) {
-  if (str == null) return "";
-  return String(str)
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-
-function renderPage(year, grid, events) {
-  // Légende
-  const legend = Object.entries(STATUS_COLORS)
-    .filter(([k]) => k !== "default")
-    .map(([label, { bg }]) =>
-      `<span class="leg"><span class="sw" style="background:${bg}"></span>${esc(label)}</span>`
-    ).join("");
-
-  // En-tête : ligne des mois
-  const headerCells = MOIS.map((m, i) =>
-    `<th title="${MOIS_LONG[i]}">${m}</th>`
-  ).join("");
-
-  // Corps : une ligne par jour
-  let rows = "";
-  for (let day = 1; day <= 31; day++) {
-    let cells = `<td class="dn">${day}</td>`;
-    for (let m = 0; m < 12; m++) {
-      const dim = daysInMonth(year, m);
-      if (day > dim) {
-        cells += `<td class="na"></td>`;
-        continue;
-      }
-      const evs = grid[m][day];
-      if (evs?.length) {
-        const { bg, text } = colorForStatus(evs[0].statut);
-        const isMulti = evs[0].dateDebut !== evs[0].dateFin && evs[0].dateFin;
-        const tip = evs.map(e =>
-          `${e.nom} [${e.statut || "?"}]${isMulti ? " (multi-jours)" : ""}`
-        ).join(" / ");
-        cells += `<td class="ev" style="background:${bg};color:${text}" title="${esc(tip)}">`;
-        if (evs.length > 1) cells += `<span class="badge">${evs.length}</span>`;
-        cells += `</td>`;
-      } else {
-        cells += `<td></td>`;
-      }
-    }
-    rows += `<tr>${cells}</tr>`;
-  }
-
-  // Section liste des événements de l'année
-  const yearEvents = events
-    .filter(e => {
-      const d = parseDate(e.dateDebut);
-      return d && d.getFullYear() === year;
-    })
-    .sort((a, b) => a.dateDebut.localeCompare(b.dateDebut));
-
-  const listRows = yearEvents.map(e => {
-    const { bg } = colorForStatus(e.statut);
-    const fin = e.dateFin && e.dateFin !== e.dateDebut ? ` → ${e.dateFin.substring(0, 10)}` : "";
-    return `<tr>
-      <td><span class="sw" style="background:${bg}"></span></td>
-      <td>${esc(e.nom)}</td>
-      <td>${esc(e.dateDebut?.substring(0, 10))}${esc(fin)}</td>
-      <td>${esc(e.statut || "—")}</td>
-      <td>${esc(e.echeanceCSE?.substring(0, 10) || "—")}</td>
-      <td>${esc(e.saison || "—")}</td>
-    </tr>`;
-  }).join("");
-
-  return `<!DOCTYPE html>
-<html lang="fr">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Calendrier SLAT ${year}</title>
-<style>
-  *{box-sizing:border-box}
-  body{font-family:system-ui,sans-serif;margin:1.5rem;background:#f5f7fa;color:#1a2744}
-  h1{font-size:1.4rem;margin-bottom:.3rem}
-  .nav{margin-bottom:1rem}
-  .nav a{margin-right:1rem;text-decoration:none;color:#4a7fb5;font-weight:600;font-size:.95rem}
-  /* Grille */
-  .wrap{overflow-x:auto}
-  table.grid{border-collapse:collapse;min-width:600px;width:100%;table-layout:fixed}
-  table.grid th,table.grid td{border:1px solid #dde3ec;text-align:center;padding:0;height:20px;font-size:.75rem}
-  table.grid th{background:#1a2744;color:#fff;padding:5px 2px;font-size:.8rem}
-  .dn{width:32px;background:#eef1f7;font-weight:600;font-size:.75rem}
-  .na{background:#f0f0f0}
-  .ev{cursor:help;position:relative}
-  .badge{position:absolute;top:1px;right:2px;font-size:.6rem;font-weight:700;background:rgba(0,0,0,.25);color:#fff;border-radius:3px;padding:0 2px;line-height:1.2}
-  /* Légende */
-  .legend{margin:1rem 0;display:flex;gap:1rem;flex-wrap:wrap;font-size:.85rem}
-  .leg{display:flex;align-items:center;gap:5px}
-  .sw{width:13px;height:13px;border-radius:3px;display:inline-block;flex-shrink:0}
-  /* Liste */
-  h2{font-size:1.1rem;margin-top:2rem}
-  table.list{border-collapse:collapse;width:100%;font-size:.85rem}
-  table.list th{background:#1a2744;color:#fff;padding:6px 8px;text-align:left}
-  table.list td{border-bottom:1px solid #dde3ec;padding:5px 8px;vertical-align:middle}
-  table.list tr:hover td{background:#eef3fb}
-  footer{margin-top:1.5rem;font-size:.75rem;color:#888}
-</style>
-</head>
-<body>
-<h1>📅 Calendrier des événements SLAT — ${year}</h1>
-<div class="nav">
-  <a href="/?year=${year-1}">← ${year-1}</a>
-  <a href="/?year=${year+1}">${year+1} →</a>
-</div>
-<div class="wrap">
-<table class="grid">
-  <thead><tr><th>J</th>${headerCells}</tr></thead>
-  <tbody>${rows}</tbody>
-</table>
-</div>
-<div class="legend">${legend}</div>
-
-<h2>Liste des événements ${year}</h2>
-<div class="wrap">
-<table class="list">
-  <thead><tr><th></th><th>Événement</th><th>Dates</th><th>Statut</th><th>Échéance CSE</th><th>Saison</th></tr></thead>
-  <tbody>${listRows || '<tr><td colspan="6" style="text-align:center;padding:1rem;color:#888">Aucun événement pour cette année</td></tr>'}</tbody>
-</table>
-</div>
-<footer>Données Nextcloud Tables · cache ${CACHE_TTL_SECONDS}s · Survolez une case pour le détail</footer>
-</body>
-</html>`;
-}
-
-// --- Serveur -------------------------------------------------------------
+// 5. Serveur Web
 const app = express();
 
 app.get("/", async (req, res) => {
   try {
-    const year = parseInt(req.query.year, 10) || new Date().getFullYear();
     const events = await fetchEvents();
-    const grid = buildGrid(year, events);
-    res.send(renderPage(year, grid, events));
+    const icsData = generateICS(events);
+    
+    // Indique au navigateur / agenda qu'il s'agit d'un fichier calendrier
+    res.set({
+      'Content-Type': 'text/calendar; charset=utf-8',
+      'Content-Disposition': 'inline; filename="slat-calendrier.ics"'
+    });
+    
+    res.send(icsData);
   } catch (err) {
     console.error(err);
-    res.status(500).send(`<pre style="color:red">Erreur : ${esc(err.message)}</pre>`);
+    res.status(500).send(`Erreur : ${err.message}`);
   }
 });
 
 app.get("/healthz", (_, res) => res.send("ok"));
 
 app.listen(parseInt(PORT, 10), () =>
-  console.log(`Calendrier SLAT démarré sur le port ${PORT}`)
+  console.log(`📡 Passerelle ICS SLAT démarrée sur le port ${PORT}`)
 );
