@@ -157,7 +157,7 @@ function generateICS(events) {
       ics.push(`DUE;VALUE=DATE:${due}`);
       
       ics.push(`SUMMARY:🔴 Com CSE : ${e.nom}`);
-      ics.push(`DESCRIPTION:Date limite pour envoyer les informations au groupe de communication du CSE.`);
+      ics.push(`DESCRIPTION:Date limite pour envoyer les infos com.`);
       
       // La tâche est terminée si l'info est envoyée, publiée ou réalisée
       const statutsTermines = ["infos envoyées", "publié", "réalisé"];
@@ -174,8 +174,17 @@ function generateICS(events) {
 
   ics.push("END:VCALENDAR");
   
-  // Le standard ICS exige des fins de ligne spécifiques (CRLF)
-  return ics.join("\r\n");
+  // RFC 5545 : Les lignes de plus de 75 caractères doivent être pliées.
+  // Nextcloud rejette le fichier entier si on ne le fait pas.
+  return ics.map(line => {
+    if (line.length <= 75) return line;
+    let folded = "";
+    for (let i = 0; i < line.length; i += 74) {
+      folded += line.substring(i, i + 74);
+      if (i + 74 < line.length) folded += "\r\n "; // Un espace au début de la ligne suivante
+    }
+    return folded;
+  }).join("\r\n");
 }
 
 // 5. Serveur Web
