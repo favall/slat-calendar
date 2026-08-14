@@ -1,11 +1,4 @@
 // Passerelle Nextcloud Tables -> Flux ICS (iCalendar)
-// Variables d'environnement requises :
-//   NEXTCLOUD_URL      ex: http://nextcloud-app-fk8gwk4sskw044kg4wkcckc0:80
-//   NC_USER            ex: admin
-//   NC_APP_PASSWORD    mot de passe d'application Nextcloud
-//   TABLE_ID           2
-//   CACHE_TTL_SECONDS  durée du cache en secondes (défaut: 120)
-//   PORT               port d'écoute (défaut: 3000)
 
 import express from "express";
 import { execSync } from "child_process";
@@ -51,6 +44,14 @@ const COL = {
   DEBUT_INSCRIPTIONS: 33,
   FIN_INSCRIPTIONS: 34,
   SAISON: 21,
+};
+
+// Dictionnaire pour traduire l'ID du statut en texte
+const STATUS_MAP = {
+  "0": "A préparer",
+  "1": "Infos envoyées",
+  "2": "Publié",
+  "3": "Réalisé"
 };
 
 let cache = { data: null, fetchedAt: 0 };
@@ -101,23 +102,24 @@ function generateICS(events) {
     "VERSION:2.0",
     "PRODID:-//SLAT//Calendrier des Evenements//FR",
     "CALSCALE:GREGORIAN",
-    "X-WR-CALNAME:Événements SLAT" // Nom de l'agenda
+    "X-WR-CALNAME:Événements SLAT"
   ];
 
-  // Horodatage actuel (exigé par la norme ICS)
   const nowStamp = new Date().toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
 
   events.forEach(e => {
     if (!e.dateDebut) return;
     
+    // Récupération du vrai texte du statut (ex: "Réalisé" au lieu de "3")
+    const statutLabel = STATUS_MAP[e.statut] || 'Non défini';
+    
     // ==========================================
-    // BLOC 1 : L'ÉVÉNEMENT (VEVENT)
+    // BLOC 1 : L'ÉVÉNEMENT PRINCIPAL
     // ==========================================
     ics.push("BEGIN:VEVENT");
     ics.push(`UID:slat-event-${e.id}@slat.info`);
     ics.push(`DTSTAMP:${nowStamp}`);
     
-    // Formatage des dates pour événements sur la journée entière (YYYYMMDD)
     const start = e.dateDebut.substring(0, 10).replace(/-/g, "");
     ics.push(`DTSTART;VALUE=DATE:${start}`);
     
@@ -132,7 +134,7 @@ function generateICS(events) {
 
     ics.push(`SUMMARY:${e.nom}`);
     
-    let desc = `Statut : ${e.statut || 'Non défini'}\\n`;
+    let desc = `Statut : ${statutLabel}\\n`;
     if (e.saison) desc += `Saison : ${e.saison}\\n`;
     if (e.debutInscriptions) desc += `Inscriptions : Du ${e.debutInscriptions.substring(0, 10)}`;
     if (e.finInscriptions) desc += ` au ${e.finInscriptions.substring(0, 10)}`;
@@ -145,43 +147,42 @@ function generateICS(events) {
     ics.push("END:VEVENT");
 
     // ==========================================
-    // BLOC 2 : LA TÂCHE (VTODO) - Échéance CSE
+    // BLOC 2 : L'ÉCHÉANCE CSE (Convertie en jalon visuel)
     // ==========================================
     if (e.echeanceCSE) {
-      ics.push("BEGIN:VTODO");
+      ics.push("BEGIN:VEVENT");
       ics.push(`UID:slat-task-cse-${e.id}@slat.info`);
       ics.push(`DTSTAMP:${nowStamp}`);
       
-      // Date d'échéance (DUE)
       const due = e.echeanceCSE.substring(0, 10).replace(/-/g, "");
-      ics.push(`DUE;VALUE=DATE:${due}`);
+      ics.push(`DTSTART;VALUE=DATE:${due}`);
       
-      ics.push(`SUMMARY:🔴 Com CSE : ${e.nom}`);
-      ics.push(`DESCRIPTION:Date limite pour envoyer les infos com.`);
+      // Fin exclusive (J+1)
+      const dDueEnd = new Date(e.echeanceCSE.substring(0, 10));
+      dDueEnd.setDate(dDueEnd.getDate() + 1);
+      const dueEnd = dDueEnd.toISOString().substring(0, 10).replace(/-/g, "");
+      ics.push(`DTEND;VALUE=DATE:${dueEnd}`);
       
-      // La tâche est terminée si l'info est envoyée, publiée ou réalisée
-      const statutsTermines = ["infos envoyées", "publié", "réalisé"];
-      const isDone = e.statut && statutsTermines.includes(e.statut.trim().toLowerCase());
+      // Si l'info est envoyée (id 1, 2 ou 3), on met une coche verte
+      const isDone = (e.statut === "1" || e.statut === "2" || e.statut === "3");
+      const icon = isDone ? "✅" : "🔴";
       
-      ics.push(`STATUS:${isDone ? 'COMPLETED' : 'NEEDS-ACTION'}`);
-      if (isDone) {
-        ics.push(`PERCENT-COMPLETE:100`);
-      }
+      ics.push(`SUMMARY:${icon} Échéance Com : ${e.nom}`);
+      ics.push(`DESCRIPTION:Date limite pour envoyer les infos de communication au CSE.`);
       
-      ics.push("END:VTODO");
+      ics.push("END:VEVENT");
     }
   });
 
   ics.push("END:VCALENDAR");
   
-  // RFC 5545 : Les lignes de plus de 75 caractères doivent être pliées.
-  // Nextcloud rejette le fichier entier si on ne le fait pas.
+  // Règle des 75 caractères max par ligne pour Nextcloud
   return ics.map(line => {
     if (line.length <= 75) return line;
     let folded = "";
     for (let i = 0; i < line.length; i += 74) {
       folded += line.substring(i, i + 74);
-      if (i + 74 < line.length) folded += "\r\n "; // Un espace au début de la ligne suivante
+      if (i + 74 < line.length) folded += "\r\n ";
     }
     return folded;
   }).join("\r\n");
@@ -195,7 +196,6 @@ app.get("/", async (req, res) => {
     const events = await fetchEvents();
     const icsData = generateICS(events);
     
-    // Indique au navigateur / agenda qu'il s'agit d'un fichier calendrier
     res.set({
       'Content-Type': 'text/calendar; charset=utf-8',
       'Content-Disposition': 'inline; filename="slat-calendrier.ics"'
