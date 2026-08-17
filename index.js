@@ -1,4 +1,4 @@
-// Passerelle Nextcloud Tables -> Flux ICS + Vue Gantt (Type Excel)
+// Passerelle Nextcloud Tables -> Gantt (Flottant), Grille (Excel) et Flux ICS
 import express from "express";
 import { execSync } from "child_process";
 
@@ -16,20 +16,8 @@ if (!baseUrl || !user || !pass) {
 
 const AUTH_HEADER = "Basic " + Buffer.from(`${user}:${pass}`).toString("base64");
 
-async function fetchJSON(path) {
-  const fullUrl = `${baseUrl}${path}`;
-  try {
-    const cmd = `curl -s -H "OCS-APIRequest: true" -H "Accept: application/json" -H "Authorization: ${AUTH_HEADER}" "${fullUrl}"`;
-    const stdout = execSync(cmd, { encoding: 'utf8' });
-    return JSON.parse(stdout);
-  } catch (err) {
-    throw new Error(`Erreur CURL API: ${err.message}`);
-  }
-}
-
+// --- UTILS & CACHES ---
 const COL = { NOM: 5, DATE_DEBUT: 8, DATE_FIN: 9, STATUS: 17, ECHEANCE_CSE: 16, DEBUT_COM: 36, FIN_COM: 37, DEBUT_INSCRIPTIONS: 33, FIN_INSCRIPTIONS: 34, SAISON: 21 };
-
-// Smileys et couleurs par statut
 const STATUS_MAP = {
   "0": { label: "À préparer", icon: "🟡", color: "#f1c40f" },
   "1": { label: "Infos envoyées", icon: "🔵", color: "#3498db" },
@@ -38,85 +26,211 @@ const STATUS_MAP = {
 };
 const DEFAULT_STATUS = { label: "Non défini", icon: "⚪", color: "#ccc" };
 
-let cache = { data: null, fetchedAt: 0 };
+let ncCache = { data: null, fetchedAt: 0 };
+let holidayCache = { data: [], fetchedAt: 0 };
 const TTL_MS = parseInt(CACHE_TTL_SECONDS, 10) * 1000;
 
-function cellValue(row, colId) {
-  const cell = row.data?.find(c => c.columnId === colId);
-  if (!cell) return null;
-  const v = cell.value;
-  if (v === null || v === undefined || v === "") return null;
-  if (Array.isArray(v) && v.length > 0 && typeof v[0] === "object") return v.map(u => u.displayName || u.id).join(", ");
-  return String(v);
-}
-
+// Fetch Nextcloud
 async function fetchEvents() {
   const now = Date.now();
-  if (cache.data && now - cache.fetchedAt < TTL_MS) return cache.data;
-  const rows = await fetchJSON(`/index.php/apps/tables/api/1/tables/${TABLE_ID}/rows`);
-  const events = rows
-    .map(row => ({
-      id: row.id,
-      nom: cellValue(row, COL.NOM) || `Événement #${row.id}`,
-      dateDebut: cellValue(row, COL.DATE_DEBUT),
-      dateFin: cellValue(row, COL.DATE_FIN),
-      statut: cellValue(row, COL.STATUS),
-      echeanceCSE: cellValue(row, COL.ECHEANCE_CSE),
-      debutCom: cellValue(row, COL.DEBUT_COM),
-      finCom: cellValue(row, COL.FIN_COM),
-      debutInscriptions: cellValue(row, COL.DEBUT_INSCRIPTIONS),
-      finInscriptions: cellValue(row, COL.FIN_INSCRIPTIONS)
-    }))
-    .filter(e => e.dateDebut);
-  cache = { data: events, fetchedAt: now };
-  return events;
+  if (ncCache.data && now - ncCache.fetchedAt < TTL_MS) return ncCache.data;
+  const fullUrl = `${baseUrl}/index.php/apps/tables/api/1/tables/${TABLE_ID}/rows`;
+  try {
+    const stdout = execSync(`curl -s -H "OCS-APIRequest: true" -H "Accept: application/json" -H "Authorization: ${AUTH_HEADER}" "${fullUrl}"`, { encoding: 'utf8' });
+    const rows = JSON.parse(stdout);
+    const events = rows.map(row => {
+      const cellValue = (colId) => {
+        const c = row.data?.find(x => x.columnId === colId);
+        if (!c || c.value === null || c.value === "") return null;
+        if (Array.isArray(c.value) && c.value.length > 0 && typeof c.value[0] === "object") return c.value.map(u => u.displayName || u.id).join(", ");
+        return String(c.value);
+      };
+      return {
+        id: row.id,
+        nom: cellValue(COL.NOM) || `Événement #${row.id}`,
+        dateDebut: cellValue(COL.DATE_DEBUT),
+        dateFin: cellValue(COL.DATE_FIN),
+        statut: cellValue(COL.STATUS),
+        echeanceCSE: cellValue(COL.ECHEANCE_CSE),
+        debutCom: cellValue(COL.DEBUT_COM),
+        finCom: cellValue(COL.FIN_COM),
+        debutInscriptions: cellValue(COL.DEBUT_INSCRIPTIONS),
+        finInscriptions: cellValue(COL.FIN_INSCRIPTIONS)
+      };
+    }).filter(e => e.dateDebut);
+    
+    events.sort((a, b) => new Date(a.dateDebut) - new Date(b.dateDebut));
+    ncCache = { data: events, fetchedAt: now };
+    return events;
+  } catch (err) { throw new Error(`Erreur Nextcloud: ${err.message}`); }
 }
 
-// ICS Generator (inchangé)
-function generateICS(events) {
-  let ics = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//SLAT//Calendrier//FR", "CALSCALE:GREGORIAN", "X-WR-CALNAME:Événements SLAT"];
-  const nowStamp = new Date().toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
-  events.forEach(e => {
-    if (!e.dateDebut) return;
-    const statut = STATUS_MAP[e.statut] || DEFAULT_STATUS;
-    ics.push("BEGIN:VEVENT", `UID:slat-ev-${e.id}@slat.info`, `DTSTAMP:${nowStamp}`);
-    const start = e.dateDebut.substring(0, 10).replace(/-/g, "");
-    ics.push(`DTSTART;VALUE=DATE:${start}`);
-    if (e.dateFin) {
-      const dEnd = new Date(e.dateFin.substring(0, 10)); dEnd.setDate(dEnd.getDate() + 1);
-      ics.push(`DTEND;VALUE=DATE:${dEnd.toISOString().substring(0, 10).replace(/-/g, "")}`);
-    } else {
-      ics.push(`DTEND;VALUE=DATE:${start}`);
+// Fetch Vacances Scolaires (Zone C) - Cache de 24h
+function getHolidays() {
+  const now = Date.now();
+  if (holidayCache.data.length > 0 && now - holidayCache.fetchedAt < 24 * 3600 * 1000) return holidayCache.data;
+  try {
+    const url = `https://data.education.gouv.fr/api/explore/v2.1/catalog/datasets/fr-en-calendrier-scolaire/records?where=location%3D%22Toulouse%22&limit=100`;
+    const stdout = execSync(`curl -s "${url}"`, { encoding: 'utf8' });
+    const json = JSON.parse(stdout);
+    if (json && json.results) {
+      holidayCache.data = json.results.map(r => ({
+        start: new Date(r.start_date).getTime(),
+        end: new Date(r.end_date).getTime()
+      }));
     }
-    ics.push(`SUMMARY:${e.nom}`);
-    let desc = `Statut : ${statut.label}\\n`;
-    if (e.debutInscriptions) desc += `Inscriptions : Du ${e.debutInscriptions.substring(0, 10)} au ${e.finInscriptions?.substring(0, 10)}\\n`;
-    if (e.debutCom) desc += `Com : Du ${e.debutCom.substring(0, 10)} au ${e.finCom?.substring(0, 10)}\\n`;
-    ics.push(`DESCRIPTION:${desc}`, "END:VEVENT");
-
-    if (e.echeanceCSE) {
-      ics.push("BEGIN:VEVENT", `UID:slat-cse-${e.id}@slat.info`, `DTSTAMP:${nowStamp}`);
-      const due = e.echeanceCSE.substring(0, 10).replace(/-/g, "");
-      ics.push(`DTSTART;VALUE=DATE:${due}`);
-      const dDueEnd = new Date(e.echeanceCSE.substring(0, 10)); dDueEnd.setDate(dDueEnd.getDate() + 1);
-      ics.push(`DTEND;VALUE=DATE:${dDueEnd.toISOString().substring(0, 10).replace(/-/g, "")}`);
-      const isDone = (e.statut === "1" || e.statut === "2" || e.statut === "3");
-      ics.push(`SUMMARY:${isDone ? "✅" : "🔴"} Échéance Com : ${e.nom}`, `DESCRIPTION:Com CSE`, "END:VEVENT");
-    }
-  });
-  ics.push("END:VCALENDAR");
-  return ics.map(l => {
-    if (l.length <= 75) return l; let f = "";
-    for (let i = 0; i < l.length; i += 74) { f += l.substring(i, i + 74); if (i + 74 < l.length) f += "\r\n "; }
-    return f;
-  }).join("\r\n");
+    holidayCache.fetchedAt = now;
+  } catch (err) { console.error("Impossible de récupérer les vacances scolaires.", err.message); }
+  return holidayCache.data;
 }
 
-// NOUVEAU Générateur HTML (Gantt Grille type Excel)
-function generateGanttHTML(events) {
+function isHoliday(timestamp, holidays) {
+  return holidays.some(h => timestamp >= h.start && timestamp <= h.end);
+}
+
+// --- VUE 1 : GANTT FLOTTANT ---
+function generateFloatingGantt(events, holidays) {
   if (events.length === 0) return "<h1>Aucun événement à afficher</h1>";
+  const todayMs = Date.now();
 
-  // 1. Calculer la période totale
+  let allDates = [];
+  events.forEach(e => {
+    ['dateDebut', 'dateFin', 'debutCom', 'finCom', 'debutInscriptions', 'finInscriptions', 'echeanceCSE'].forEach(c => {
+      if (e[c]) allDates.push(new Date(e[c].substring(0, 10)).getTime());
+    });
+  });
+
+  const minTime = Math.min(...allDates) - (10 * 24 * 3600 * 1000); // 10 jours de marge
+  const maxTime = Math.max(...allDates) + (15 * 24 * 3600 * 1000);
+  const totalSpan = maxTime - minTime;
+  const getPos = (dStr) => dStr ? ((new Date(dStr.substring(0, 10)).getTime() - minTime) / totalSpan) * 100 : null;
+
+  // Création de l'arrière plan (Mois, Weekends, Vacances, Ligne Aujourd'hui)
+  let bgHTML = '';
+  let cur = new Date(minTime);
+  cur.setHours(0,0,0,0);
+  const MOIS_NOMS = ["Janv", "Févr", "Mars", "Avril", "Mai", "Juin", "Juil", "Août", "Sept", "Oct", "Nov", "Déc"];
+  
+  while (cur.getTime() <= maxTime) {
+    const t = cur.getTime();
+    const pos = ((t - minTime) / totalSpan) * 100;
+    const width = (86400000 / totalSpan) * 100;
+    
+    if (cur.getDay() === 0 || cur.getDay() === 6) {
+      bgHTML += `<div class="bg-weekend" style="left:${pos}%; width:${width}%;"></div>`;
+    } else if (isHoliday(t, holidays)) {
+      bgHTML += `<div class="bg-holiday" style="left:${pos}%; width:${width}%;"></div>`;
+    }
+    
+    if (cur.getDate() === 1) {
+      bgHTML += `<div class="bg-month-line" style="left:${pos}%;"></div>`;
+      bgHTML += `<div class="bg-month-label" style="left:${pos}%;">${MOIS_NOMS[cur.getMonth()]} ${cur.getFullYear()}</div>`;
+    }
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  const todayPos = ((todayMs - minTime) / totalSpan) * 100;
+  if (todayPos >= 0 && todayPos <= 100) {
+    bgHTML += `<div class="bg-today" style="left:${todayPos}%;" title="Aujourd'hui"></div>`;
+  }
+
+  // Événements
+  let htmlFiltres = "";
+  let rowsHTML = events.map(e => {
+    let barres = '';
+    const evEndTime = new Date(e.dateFin || e.dateDebut).getTime();
+    const isPast = (evEndTime + 86400000) < todayMs; // Terminé si date de fin + 1 jour est passée
+    const displayStyle = isPast ? "display:none;" : "";
+    const checkedAttr = isPast ? "" : "checked";
+    
+    const s = STATUS_MAP[e.statut] || DEFAULT_STATUS;
+    htmlFiltres += `<label><input type="checkbox" ${checkedAttr} onchange="toggleEv('row-${e.id}', this)"> ${s.icon} ${e.nom}</label>`;
+
+    const pComD = getPos(e.debutCom), pComF = getPos(e.finCom);
+    if (pComD !== null && pComF !== null) barres += `<div class="bar bar-com" style="left:${pComD}%; width:${Math.max(pComF - pComD, 0.5)}%;" title="Com">Com</div>`;
+
+    const pInsD = getPos(e.debutInscriptions), pInsF = getPos(e.finInscriptions);
+    if (pInsD !== null && pInsF !== null) barres += `<div class="bar bar-ins" style="left:${pInsD}%; width:${Math.max(pInsF - pInsD, 0.5)}%;" title="Inscriptions">Insc.</div>`;
+
+    const pEvD = getPos(e.dateDebut), pEvF = getPos(e.dateFin || e.dateDebut);
+    if (pEvD !== null) barres += `<div class="bar bar-ev" style="left:${pEvD}%; width:${Math.max(pEvF - pEvD, 0.5)}%;" title="Événement">${e.nom}</div>`;
+
+    const pCse = getPos(e.echeanceCSE);
+    if (pCse !== null) {
+      const isDone = (e.statut === "1" || e.statut === "2" || e.statut === "3");
+      barres += `<div class="marker-cse" style="left:${pCse}%;">${isDone ? "✅" : "🔴"}</div>`;
+    }
+
+    return `
+      <div class="gantt-row" id="row-${e.id}" style="${displayStyle}">
+        <div class="row-label">
+          <strong>${e.nom}</strong>
+          <span class="badge">${s.label}</span>
+        </div>
+        <div class="row-track">${barres}</div>
+      </div>
+    `;
+  }).join("");
+
+  return `<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Gantt SLAT</title>
+    <style>
+      body { font-family: system-ui, sans-serif; background: #f4f7f6; margin: 2rem; color: #333; }
+      .nav-tabs { margin-bottom: 20px; }
+      .nav-tabs a { padding: 8px 15px; background: #dae5f1; text-decoration: none; border-radius: 4px; color: #333; margin-right: 10px; font-weight: bold; border: 1px solid #5a7b9c; }
+      .nav-tabs a.active { background: #5a7b9c; color: white; }
+      .controls { background: white; padding: 10px; border-radius: 8px; margin-bottom: 15px; display: flex; flex-wrap: wrap; gap: 10px; font-size: 0.85rem; border: 1px solid #e1e8ed; }
+      .controls label { cursor: pointer; padding: 4px 8px; background: #eef2f5; border-radius: 4px; }
+      
+      .gantt-container { background: #fff; border-radius: 8px; border: 1px solid #e1e8ed; overflow: hidden; position: relative; }
+      .bg-layer { position: absolute; top: 0; left: 250px; right: 0; height: 100%; pointer-events: none; z-index: 0; }
+      .bg-weekend { position: absolute; height: 100%; background: rgba(0,0,0,0.03); }
+      .bg-holiday { position: absolute; height: 100%; background: rgba(46,204,113,0.15); }
+      .bg-month-line { position: absolute; height: 100%; width: 1px; background: #ccc; }
+      .bg-month-label { position: absolute; top: 5px; margin-left: 5px; font-size: 11px; font-weight: bold; color: #777; }
+      .bg-today { position: absolute; height: 100%; width: 2px; background: rgba(231, 76, 60, 0.8); z-index: 5; }
+
+      .rows-layer { position: relative; z-index: 1; padding-top: 25px; } /* Espace pour les mois */
+      .gantt-row { display: flex; border-bottom: 1px solid #f0f0f0; min-height: 55px; }
+      .row-label { width: 250px; min-width: 250px; padding: 10px; background: rgba(255,255,255,0.9); border-right: 1px solid #e1e8ed; display: flex; flex-direction: column; justify-content: center; font-size: 0.9rem; z-index: 10; }
+      .badge { font-size: 0.7rem; color: #888; margin-top: 4px; }
+      .row-track { flex-grow: 1; position: relative; padding: 10px 0; }
+      
+      .bar { position: absolute; height: 18px; border-radius: 3px; color: white; font-size: 0.7rem; font-weight: 600; display: flex; align-items: center; padding: 0 5px; overflow: hidden; white-space: nowrap; box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
+      .bar-com { background-color: #9b59b6; top: 0px; height: 14px; font-size: 0.6rem; }
+      .bar-ins { background-color: #3498db; top: 16px; height: 14px; font-size: 0.6rem; }
+      .bar-ev { background-color: #2ecc71; top: 32px; }
+      .marker-cse { position: absolute; top: -5px; transform: translateX(-50%); font-size: 0.9rem; }
+      
+      .legend { display: flex; gap: 15px; margin-top: 15px; font-size: 0.85rem; }
+      .leg-item { display: flex; align-items: center; gap: 5px; }
+      .box { width: 15px; height: 15px; border-radius: 3px; }
+    </style>
+    <script>
+      function toggleEv(id, cb) { document.getElementById(id).style.display = cb.checked ? '' : 'none'; }
+    </script>
+    </head><body>
+      <h1>Planning SLAT</h1>
+      <div class="nav-tabs"><a href="/" class="active">Vue Gantt Flottant</a> <a href="/grille">Vue Grille (Excel)</a></div>
+      <div class="controls"><strong>Filtres:</strong> ${htmlFiltres}</div>
+      <div class="gantt-container">
+        <div class="bg-layer">${bgHTML}</div>
+        <div class="rows-layer">${rowsHTML}</div>
+      </div>
+      <div class="legend">
+        <div class="leg-item"><div class="box" style="background:#9b59b6"></div> Com</div>
+        <div class="leg-item"><div class="box" style="background:#3498db"></div> Inscriptions</div>
+        <div class="leg-item"><div class="box" style="background:#2ecc71"></div> Événement</div>
+        <div class="leg-item"><div class="box" style="background:rgba(46,204,113,0.3)"></div> Vacances Zone C</div>
+      </div>
+    </body></html>`;
+}
+
+// --- VUE 2 : GRILLE TYPE EXCEL ---
+function generateGridHTML(events, holidays) {
+  if (events.length === 0) return "<h1>Aucun événement à afficher</h1>";
+  const todayMs = Date.now();
+  const todayStr = new Date().toISOString().substring(0,10);
+
   let minTime = Infinity, maxTime = -Infinity;
   events.forEach(e => {
     ['dateDebut', 'dateFin', 'debutCom', 'finCom', 'debutInscriptions', 'finInscriptions', 'echeanceCSE'].forEach(c => {
@@ -124,238 +238,170 @@ function generateGanttHTML(events) {
     });
   });
   
-  // Arrondir au 1er du mois de début, et au dernier jour du mois de fin
   const minDate = new Date(minTime); minDate.setDate(1);
   const maxDate = new Date(maxTime); maxDate.setMonth(maxDate.getMonth() + 1, 0);
 
-  // 2. Construire le calendrier (Jours & Mois)
-  const days = [];
-  const monthsMap = new Map(); // Regrouper par mois
+  const days = [], monthsMap = new Map();
   const MOIS_NOMS = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"];
   const JOURS_NOMS = ["D", "L", "M", "M", "J", "V", "S"];
 
   let cur = new Date(minDate);
   while (cur <= maxDate) {
+    const t = cur.getTime();
     const dStr = cur.toISOString().substring(0, 10);
-    const mStr = dStr.substring(0, 7); // ex: 2026-11
-    const isWeekend = cur.getDay() === 0 || cur.getDay() === 6;
-    const isFirstOfMonth = cur.getDate() === 1;
-
-    days.push({ str: dStr, num: cur.getDate(), weekDay: JOURS_NOMS[cur.getDay()], isWeekend, mStr, isFirstOfMonth });
+    const mStr = dStr.substring(0, 7);
+    days.push({ 
+      str: dStr, num: cur.getDate(), weekDay: JOURS_NOMS[cur.getDay()], 
+      isWeekend: cur.getDay() === 0 || cur.getDay() === 6, 
+      isHoliday: isHoliday(t, holidays), mStr, isFirstOfMonth: cur.getDate() === 1,
+      isToday: dStr === todayStr
+    });
     if (!monthsMap.has(mStr)) monthsMap.set(mStr, { name: `${MOIS_NOMS[cur.getMonth()]} ${cur.getFullYear()}`, count: 0 });
     monthsMap.get(mStr).count++;
     cur.setDate(cur.getDate() + 1);
   }
 
-  // 3. Trier les événements par date de début
-  events.sort((a, b) => new Date(a.dateDebut) - new Date(b.dateDebut));
-
-  // 4. Générer les En-têtes (Mois puis Jours)
   let htmlMois = `<th class="corner sticky-left sticky-top">Événements</th>`;
   let htmlJours = `<th class="corner-sub sticky-left sticky-top2">Filtres et Noms</th>`;
-  
   monthsMap.forEach((data, mKey) => {
-    htmlMois += `<th colspan="${data.count}" class="th-mois sticky-top" id="th-${mKey}" data-m="${mKey}">
-      <button class="btn-col" onclick="toggleMois('${mKey}')">[-]</button> ${data.name}
-    </th>`;
-    htmlJours += `<th class="th-collapsed-indicator sticky-top2" data-m="${mKey}" style="display:none;" title="${data.name}">+</th>`;
+    htmlMois += `<th colspan="${data.count}" class="th-mois sticky-top" id="th-${mKey}" data-m="${mKey}"><button class="btn-col" onclick="toggleMois('${mKey}')">[-]</button> ${data.name}</th>`;
+    htmlJours += `<th class="th-collapsed-indicator sticky-top2" data-m="${mKey}" style="display:none;">+</th>`;
   });
 
   days.forEach(d => {
     let classes = `th-jour sticky-top2`;
     if (d.isWeekend) classes += ` wknd`;
+    if (d.isHoliday) classes += ` hol`;
+    if (d.isToday) classes += ` today`;
     if (d.isFirstOfMonth) classes += ` first-day`;
-    htmlJours += `<th class="${classes}" data-m="${d.mStr}">
-      <div class="dow">${d.weekDay}</div>
-      <div class="dom">${d.num}</div>
-    </th>`;
+    htmlJours += `<th class="${classes}" data-m="${d.mStr}"><div class="dow">${d.weekDay}</div><div class="dom">${d.num}</div></th>`;
   });
 
-  // 5. Générer les Lignes et les Filtres
-  let htmlLignes = "";
-  let htmlFiltres = "";
-
+  let htmlLignes = "", htmlFiltres = "";
   events.forEach(e => {
+    const evEndTime = new Date(e.dateFin || e.dateDebut).getTime();
+    const isPast = (evEndTime + 86400000) < todayMs;
     const s = STATUS_MAP[e.statut] || DEFAULT_STATUS;
     
-    // Panneau de filtre
-    htmlFiltres += `<label><input type="checkbox" checked onchange="toggleEv(${e.id}, this)"> ${s.icon} ${e.nom}</label>`;
+    htmlFiltres += `<label><input type="checkbox" ${isPast ? "" : "checked"} onchange="toggleEv('tr-${e.id}', this)"> ${s.icon} ${e.nom}</label>`;
+    htmlLignes += `<tr id="tr-${e.id}" style="${isPast ? 'display:none;' : ''}">`;
+    htmlLignes += `<td class="td-nom sticky-left"><span class="icon">${s.icon}</span> ${e.nom}</td>`;
+    
+    monthsMap.forEach((_, mKey) => htmlLignes += `<td class="td-collapsed-indicator" data-m="${mKey}" style="display:none;"></td>`);
 
-    // Ligne du tableau
-    htmlLignes += `<tr id="tr-${e.id}">`;
-    htmlLignes += `<td class="td-nom sticky-left" title="Statut: ${s.label}">
-      <span class="icon">${s.icon}</span> <span class="ev-nom">${e.nom}</span>
-    </td>`;
-
-    // Cellules jours pour chaque événement
-    const datesEv = {
-      evD: e.dateDebut ? e.dateDebut.substring(0, 10) : null,
-      evF: e.dateFin ? e.dateFin.substring(0, 10) : (e.dateDebut ? e.dateDebut.substring(0, 10) : null),
-      coD: e.debutCom ? e.debutCom.substring(0, 10) : null,
-      coF: e.finCom ? e.finCom.substring(0, 10) : (e.debutCom ? e.debutCom.substring(0, 10) : null),
-      inD: e.debutInscriptions ? e.debutInscriptions.substring(0, 10) : null,
-      inF: e.finInscriptions ? e.finInscriptions.substring(0, 10) : (e.debutInscriptions ? e.debutInscriptions.substring(0, 10) : null),
-      cse: e.echeanceCSE ? e.echeanceCSE.substring(0, 10) : null
-    };
-
-    monthsMap.forEach((_, mKey) => {
-      htmlLignes += `<td class="td-collapsed-indicator" data-m="${mKey}" style="display:none;"></td>`;
-    });
+    const dEv = { evD: e.dateDebut?.substring(0,10), evF: (e.dateFin||e.dateDebut)?.substring(0,10), coD: e.debutCom?.substring(0,10), coF: (e.finCom||e.debutCom)?.substring(0,10), inD: e.debutInscriptions?.substring(0,10), inF: (e.finInscriptions||e.debutInscriptions)?.substring(0,10), cse: e.echeanceCSE?.substring(0,10) };
 
     days.forEach(d => {
       let content = '';
-      if (datesEv.coD && d.str >= datesEv.coD && d.str <= datesEv.coF) content += `<div class="b-com" title="Com"></div>`;
-      if (datesEv.inD && d.str >= datesEv.inD && d.str <= datesEv.inF) content += `<div class="b-ins" title="Inscriptions"></div>`;
-      if (datesEv.evD && d.str >= datesEv.evD && d.str <= datesEv.evF) content += `<div class="b-ev" title="Événement"></div>`;
-      if (datesEv.cse === d.str) content += `<div class="m-cse" title="Échéance CSE">🔴</div>`;
+      if (dEv.coD && d.str >= dEv.coD && d.str <= dEv.coF) content += `<div class="b-com"></div>`;
+      if (dEv.inD && d.str >= dEv.inD && d.str <= dEv.inF) content += `<div class="b-ins"></div>`;
+      if (dEv.evD && d.str >= dEv.evD && d.str <= dEv.evF) content += `<div class="b-ev"></div>`;
+      if (dEv.cse === d.str) content += `<div class="m-cse">${(e.statut === "1" || e.statut === "2" || e.statut === "3") ? "✅" : "🔴"}</div>`;
 
       let classes = `td-jour`;
       if (d.isWeekend) classes += ` wknd`;
+      if (d.isHoliday) classes += ` hol`;
+      if (d.isToday) classes += ` today`;
       if (d.isFirstOfMonth) classes += ` first-day`;
-
       htmlLignes += `<td class="${classes}" data-m="${d.mStr}">${content}</td>`;
     });
     htmlLignes += `</tr>`;
   });
 
-  return `
-    <!DOCTYPE html>
-    <html lang="fr">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Planning SLAT</title>
-      <style>
-        body { font-family: system-ui, sans-serif; background: #f5f7fa; margin: 0; padding: 20px; color: #333; height: 100vh; display: flex; flex-direction: column; box-sizing: border-box; }
-        h1 { margin: 0 0 10px 0; font-size: 1.5rem; }
-        
-        /* Panneau de filtres */
-        .controls { background: white; padding: 10px; border-radius: 8px; margin-bottom: 15px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); display: flex; flex-wrap: wrap; gap: 10px; font-size: 0.85rem; align-items: center; }
-        .controls label { cursor: pointer; padding: 4px 8px; background: #eef2f5; border-radius: 4px; border: 1px solid #dcdcdc; }
-        .controls label:hover { background: #e2e8ed; }
-        .legend { margin-left: auto; display: flex; gap: 15px; }
-        .leg-item { display: flex; align-items: center; gap: 4px; font-weight: bold; }
-        .b-leg { width: 12px; height: 12px; border-radius: 2px; }
-
-        /* Conteneur scrollable */
-        .table-wrap { flex: 1; overflow: auto; background: white; border: 1px solid #ccc; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        
-        table { border-collapse: collapse; width: max-content; }
-        th, td { border: 1px solid #e1e8ed; text-align: center; padding: 0; }
-        
-        /* Fixation des entêtes (Sticky) */
-        .sticky-top { position: sticky; top: 0; z-index: 10; background: #9bb7d4; color: white; border-bottom: 2px solid #5a7b9c; height: 35px; } /* Bleu type Excel */
-        .sticky-top2 { position: sticky; top: 35px; z-index: 10; background: #dae5f1; font-size: 0.75rem; height: 35px; }
-        .sticky-left { position: sticky; left: 0; z-index: 15; background: white; border-right: 2px solid #5a7b9c; text-align: left; }
-        
-        .corner { z-index: 20; background: #7a9cb9; border-bottom: none; }
-        .corner-sub { z-index: 20; background: #dae5f1; }
-
-        /* Mois et boutons */
-        .th-mois { font-weight: bold; padding: 0 10px; border-left: 2px solid #2c3e50; }
-        .btn-col { background: none; border: none; color: white; cursor: pointer; font-weight: bold; font-size: 0.9rem; padding: 0 5px; }
-        .btn-col:hover { color: #ffeaa7; }
-
-        /* Jours */
-        .th-jour { width: 22px; min-width: 22px; }
-        .th-jour .dow { font-size: 0.65rem; color: #555; }
-        .th-jour .dom { font-weight: bold; }
-        .first-day { border-left: 2px solid #2c3e50; }
-        .wknd { background-color: #f1f1f1 !important; }
-
-        /* Cellules d'événements */
-        .td-nom { padding: 5px 10px; width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.85rem; font-weight: bold; }
-        .icon { font-size: 1rem; margin-right: 5px; }
-        .td-jour { vertical-align: top; padding-top: 2px; height: 30px; position: relative; }
-        
-        /* Barres de couleur */
-        .b-com { height: 6px; background-color: #f39c12; margin-bottom: 1px; width: 100%; } /* Orange */
-        .b-ins { height: 6px; background-color: #3498db; margin-bottom: 1px; width: 100%; } /* Bleu */
-        .b-ev { height: 10px; background-color: #27ae60; margin-bottom: 1px; width: 100%; } /* Vert */
-        .m-cse { font-size: 0.7rem; position: absolute; left: 50%; transform: translateX(-50%); top: 4px; z-index: 5; }
-
-        /* Mode replié */
-        .th-collapsed-indicator, .td-collapsed-indicator { width: 20px; background: #ecf0f1; border-left: 2px solid #2c3e50; cursor: pointer; font-weight: bold; color: #888; }
-        .td-collapsed-indicator { background: #fdfdfd; }
-      </style>
-      <script>
-        function toggleEv(id, cb) {
-          document.getElementById('tr-' + id).style.display = cb.checked ? '' : 'none';
-        }
-        
-        function toggleMois(mKey) {
-          const isCollapsed = document.getElementById('th-' + mKey).dataset.collapsed === 'true';
-          const els = document.querySelectorAll('[data-m="' + mKey + '"]');
-          
-          els.forEach(el => {
-            if (el.classList.contains('th-mois')) {
-              if (isCollapsed) {
-                el.colSpan = el.dataset.fullspan;
-                el.dataset.collapsed = 'false';
-                el.querySelector('.btn-col').textContent = '[-]';
-              } else {
-                if (!el.dataset.fullspan) el.dataset.fullspan = el.colSpan;
-                el.colSpan = 1;
-                el.dataset.collapsed = 'true';
-                el.querySelector('.btn-col').textContent = '[+]';
-              }
-            } else if (el.classList.contains('th-collapsed-indicator') || el.classList.contains('td-collapsed-indicator')) {
-              el.style.display = isCollapsed ? 'none' : '';
-            } else {
-              el.style.display = isCollapsed ? '' : 'none';
-            }
-          });
-        }
-      </script>
-    </head>
-    <body>
-      <h1>Planning des Événements SLAT</h1>
-      <div class="controls">
-        <strong>Filtres :</strong>
-        ${htmlFiltres}
-        <div class="legend">
-          <div class="leg-item"><div class="b-leg" style="background:#f39c12;"></div> Com</div>
-          <div class="leg-item"><div class="b-leg" style="background:#3498db;"></div> Inscriptions</div>
-          <div class="leg-item"><div class="b-leg" style="background:#27ae60;"></div> Événement</div>
-        </div>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>${htmlMois}</tr>
-            <tr>${htmlJours}</tr>
-          </thead>
-          <tbody>
-            ${htmlLignes}
-          </tbody>
-        </table>
-      </div>
-    </body>
-    </html>
-  `;
+  return `<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Planning SLAT - Grille</title>
+    <style>
+      body { font-family: system-ui, sans-serif; background: #f5f7fa; margin: 2rem; color: #333; height: 90vh; display: flex; flex-direction: column; }
+      .nav-tabs { margin-bottom: 20px; }
+      .nav-tabs a { padding: 8px 15px; background: #dae5f1; text-decoration: none; border-radius: 4px; color: #333; margin-right: 10px; font-weight: bold; border: 1px solid #5a7b9c; }
+      .nav-tabs a.active { background: #5a7b9c; color: white; }
+      .controls { background: white; padding: 10px; border-radius: 8px; margin-bottom: 15px; display: flex; flex-wrap: wrap; gap: 10px; font-size: 0.85rem; border: 1px solid #e1e8ed; }
+      .controls label { cursor: pointer; padding: 4px 8px; background: #eef2f5; border-radius: 4px; }
+      .table-wrap { flex: 1; overflow: auto; background: white; border: 1px solid #ccc; }
+      table { border-collapse: collapse; width: max-content; }
+      th, td { border: 1px solid #e1e8ed; text-align: center; padding: 0; }
+      
+      .sticky-top { position: sticky; top: 0; z-index: 10; background: #9bb7d4; color: white; border-bottom: 2px solid #5a7b9c; height: 35px; }
+      .sticky-top2 { position: sticky; top: 35px; z-index: 10; background: #dae5f1; font-size: 0.75rem; height: 35px; }
+      .sticky-left { position: sticky; left: 0; z-index: 15; background: white; border-right: 2px solid #5a7b9c; text-align: left; }
+      .corner { z-index: 20; background: #7a9cb9; border-bottom: none; } .corner-sub { z-index: 20; background: #dae5f1; }
+      
+      .th-mois { font-weight: bold; padding: 0 10px; border-left: 2px solid #2c3e50; }
+      .btn-col { background: none; border: none; color: white; cursor: pointer; font-weight: bold; padding: 0 5px; }
+      .th-jour { width: 22px; min-width: 22px; }
+      .th-jour .dow { font-size: 0.65rem; color: #555; }
+      .first-day { border-left: 2px solid #2c3e50; }
+      
+      .wknd { background-color: rgba(0,0,0,0.03) !important; }
+      .hol { background-color: rgba(46,204,113,0.15) !important; }
+      .today { border-left: 2px solid red !important; border-right: 2px solid red !important; background-color: rgba(231,76,60,0.1) !important; }
+      
+      .td-nom { padding: 5px 10px; width: 220px; font-size: 0.85rem; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .td-jour { vertical-align: top; padding-top: 2px; height: 30px; position: relative; }
+      .b-com { height: 6px; background-color: #9b59b6; margin-bottom: 1px; width: 100%; }
+      .b-ins { height: 6px; background-color: #3498db; margin-bottom: 1px; width: 100%; }
+      .b-ev { height: 10px; background-color: #2ecc71; margin-bottom: 1px; width: 100%; }
+      .m-cse { font-size: 0.7rem; position: absolute; left: 50%; transform: translateX(-50%); top: 4px; z-index: 5; }
+      
+      .th-collapsed-indicator, .td-collapsed-indicator { width: 20px; background: #ecf0f1; border-left: 2px solid #2c3e50; cursor: pointer; color: #888; }
+    </style>
+    <script>
+      function toggleEv(id, cb) { document.getElementById(id).style.display = cb.checked ? '' : 'none'; }
+      function toggleMois(mKey) {
+        const isC = document.getElementById('th-'+mKey).dataset.c === '1';
+        document.querySelectorAll('[data-m="'+mKey+'"]').forEach(el => {
+          if(el.classList.contains('th-mois')) { el.colSpan = isC ? el.dataset.fs : 1; el.dataset.c = isC ? '0' : '1'; el.querySelector('.btn-col').textContent = isC ? '[-]' : '[+]'; if(!el.dataset.fs) el.dataset.fs = el.colSpan; }
+          else { el.style.display = (el.classList.contains('th-collapsed-indicator') || el.classList.contains('td-collapsed-indicator')) ? (isC ? 'none' : '') : (isC ? '' : 'none'); }
+        });
+      }
+    </script>
+    </head><body>
+      <h1>Planning SLAT</h1>
+      <div class="nav-tabs"><a href="/">Vue Gantt Flottant</a> <a href="/grille" class="active">Vue Grille (Excel)</a></div>
+      <div class="controls"><strong>Filtres:</strong> ${htmlFiltres}</div>
+      <div class="table-wrap"><table><thead><tr>${htmlMois}</tr><tr>${htmlJours}</tr></thead><tbody>${htmlLignes}</tbody></table></div>
+    </body></html>`;
 }
 
+// ICS standard
+function generateICS(events) {
+  let ics = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//SLAT//Calendrier//FR", "CALSCALE:GREGORIAN", "X-WR-CALNAME:Événements SLAT"];
+  const nowStamp = new Date().toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
+  events.forEach(e => {
+    if (!e.dateDebut) return;
+    ics.push("BEGIN:VEVENT", `UID:slat-ev-${e.id}@slat.info`, `DTSTAMP:${nowStamp}`);
+    const start = e.dateDebut.substring(0, 10).replace(/-/g, ""); ics.push(`DTSTART;VALUE=DATE:${start}`);
+    if (e.dateFin) { const dE = new Date(e.dateFin.substring(0, 10)); dE.setDate(dE.getDate() + 1); ics.push(`DTEND;VALUE=DATE:${dE.toISOString().substring(0, 10).replace(/-/g, "")}`); } else { ics.push(`DTEND;VALUE=DATE:${start}`); }
+    ics.push(`SUMMARY:${e.nom}`, `DESCRIPTION:Statut : ${(STATUS_MAP[e.statut] || DEFAULT_STATUS).label}`, "END:VEVENT");
+    if (e.echeanceCSE) {
+      ics.push("BEGIN:VEVENT", `UID:slat-cse-${e.id}@slat.info`, `DTSTAMP:${nowStamp}`);
+      const due = e.echeanceCSE.substring(0, 10).replace(/-/g, ""); ics.push(`DTSTART;VALUE=DATE:${due}`);
+      const dDueE = new Date(e.echeanceCSE.substring(0, 10)); dDueE.setDate(dDueE.getDate() + 1); ics.push(`DTEND;VALUE=DATE:${dDueE.toISOString().substring(0, 10).replace(/-/g, "")}`);
+      ics.push(`SUMMARY:${(e.statut === "1" || e.statut === "2" || e.statut === "3") ? "✅" : "🔴"} Échéance Com : ${e.nom}`, `DESCRIPTION:Com CSE`, "END:VEVENT");
+    }
+  });
+  ics.push("END:VCALENDAR");
+  return ics.map(l => { if (l.length <= 75) return l; let f = ""; for (let i = 0; i < l.length; i += 74) { f += l.substring(i, i + 74); if (i + 74 < l.length) f += "\r\n "; } return f; }).join("\r\n");
+}
+
+// --- SERVEUR EXPRESS ---
 const app = express();
 
 app.get("/", async (req, res) => {
-  try {
-    const events = await fetchEvents();
-    res.send(generateGanttHTML(events));
-  } catch (err) {
-    res.status(500).send(`Erreur : ${err.message}`);
-  }
+  try { res.send(generateFloatingGantt(await fetchEvents(), getHolidays())); }
+  catch (err) { res.status(500).send(`Erreur : ${err.message}`); }
+});
+
+app.get("/grille", async (req, res) => {
+  try { res.send(generateGridHTML(await fetchEvents(), getHolidays())); }
+  catch (err) { res.status(500).send(`Erreur : ${err.message}`); }
 });
 
 app.get("/ics", async (req, res) => {
   try {
-    const events = await fetchEvents();
     res.set({ 'Content-Type': 'text/calendar; charset=utf-8', 'Content-Disposition': 'inline; filename="slat.ics"' });
-    res.send(generateICS(events));
-  } catch (err) {
-    res.status(500).send(`Erreur : ${err.message}`);
-  }
+    res.send(generateICS(await fetchEvents()));
+  } catch (err) { res.status(500).send(`Erreur : ${err.message}`); }
 });
 
 app.get("/healthz", (_, res) => res.send("ok"));
-
-app.listen(parseInt(PORT, 10), () => console.log(`Serveur démarré (Port ${PORT})`) );
+app.listen(parseInt(PORT, 10), () => console.log(`Serveur démarré (Port ${PORT})`));
