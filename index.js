@@ -29,7 +29,6 @@ let ncCache = { data: null, fetchedAt: 0 };
 let holidayCache = { data: [], fetchedAt: 0 };
 const TTL_MS = parseInt(CACHE_TTL_SECONDS, 10) * 1000;
 
-// Outils de formatage des dates
 function formatDateFR(dateStr) {
   if (!dateStr) return '';
   const d = new Date(dateStr.substring(0, 10));
@@ -116,7 +115,6 @@ function generateFloatingGantt(events, holidays) {
   const totalSpan = maxTime - minTime;
   const getPos = (dStr) => dStr ? ((new Date(dStr.substring(0, 10)).getTime() - minTime) / totalSpan) * 100 : null;
 
-  // Calcul du calendrier pour l'arrière-plan et l'en-tête (Mois et Semaines)
   let bgHTML = '';
   let timelineHTML = '';
   let cur = new Date(minTime);
@@ -131,6 +129,7 @@ function generateFloatingGantt(events, holidays) {
     let pos = ((t - minTime) / totalSpan) * 100;
     let width = (86400000 / totalSpan) * 100;
     
+    // Weekends (Samedi 6, Dimanche 0) & Vacances
     if (cur.getDay() === 0 || cur.getDay() === 6) bgHTML += `<div class="bg-weekend" style="left:${pos}%; width:${width}%;"></div>`;
     else if (isHoliday(t, holidays)) bgHTML += `<div class="bg-holiday" style="left:${pos}%; width:${width}%;"></div>`;
     
@@ -139,13 +138,14 @@ function generateFloatingGantt(events, holidays) {
     if (!months[mKey]) months[mKey] = { start: pos, end: pos, name: MOIS_NOMS[cur.getMonth()] + " " + cur.getFullYear() };
     months[mKey].end = pos + width;
 
-    // Groupement par semaine
-    let wn = getWeekNumber(cur);
-    let yKey = cur.getFullYear();
-    if (cur.getMonth() === 11 && wn === 1) yKey++;
-    if (cur.getMonth() === 0 && wn > 51) yKey--;
-    let wKey = yKey + "-W" + wn;
-    if (!weeks[wKey]) weeks[wKey] = { start: pos, end: pos, num: wn, firstDate: t, lastDate: t };
+    // Groupement par semaine stricte (Lundi au Dimanche)
+    let dayOfWeek = cur.getDay() || 7; // Lundi = 1, Dimanche = 7
+    let monday = new Date(cur);
+    monday.setDate(cur.getDate() - dayOfWeek + 1);
+    monday.setHours(0,0,0,0);
+    let wKey = monday.getTime();
+
+    if (!weeks[wKey]) weeks[wKey] = { start: pos, end: pos, num: getWeekNumber(cur), firstDate: t, lastDate: t };
     weeks[wKey].end = pos + width;
     weeks[wKey].lastDate = t;
 
@@ -155,7 +155,6 @@ function generateFloatingGantt(events, holidays) {
   const todayPos = ((todayMs - minTime) / totalSpan) * 100;
   if (todayPos >= 0 && todayPos <= 100) bgHTML += `<div class="bg-today" style="left:${todayPos}%;" title="Aujourd'hui"></div>`;
 
-  // Construction des En-têtes Temporels
   Object.values(months).forEach(m => {
     timelineHTML += `<div class="bg-month-block" style="left:${m.start}%; width:${m.end - m.start}%;">${m.name}</div>`;
     bgHTML += `<div class="bg-month-line" style="left:${m.start}%;"></div>`;
@@ -166,7 +165,6 @@ function generateFloatingGantt(events, holidays) {
     bgHTML += `<div class="bg-week-line" style="left:${w.start}%;"></div>`;
   });
 
-  // Construction des Lignes
   let htmlFiltres = "";
   let rowsHTML = events.map(e => {
     let barres = '';
@@ -219,25 +217,34 @@ function generateFloatingGantt(events, holidays) {
       .controls { background: white; padding: 10px; border-radius: 8px; margin-bottom: 15px; display: flex; flex-wrap: wrap; gap: 10px; font-size: 0.85rem; border: 1px solid #e1e8ed; }
       .controls label { cursor: pointer; padding: 4px 8px; background: #eef2f5; border-radius: 4px; }
       
-      .gantt-container { background: #fff; border-radius: 8px; border: 1px solid #e1e8ed; overflow: hidden; position: relative; }
+      /* ASCENSEUR HORIZONTAL & FIXATION */
+      .gantt-container { background: #fff; border-radius: 8px; border: 1px solid #e1e8ed; overflow-x: auto; position: relative; }
+      .gantt-wrapper { min-width: 1500px; display: flex; flex-direction: column; position: relative; }
       
-      .timeline-header { position: absolute; top: 0; left: 250px; right: 0; height: 40px; background: #fff; z-index: 20; border-bottom: 1px solid #ccc; }
+      .timeline-header { display: flex; height: 40px; background: #fff; border-bottom: 1px solid #ccc; position: sticky; top: 0; z-index: 40; }
+      .header-corner { position: sticky; left: 0; width: 250px; min-width: 250px; background: #fff; border-right: 1px solid #e1e8ed; z-index: 50; display: flex; align-items: center; padding: 0 10px; font-weight: bold; box-sizing: border-box; }
+      .header-tracks { flex-grow: 1; position: relative; }
+      
+      .bg-layer { display: flex; position: absolute; top: 40px; left: 0; right: 0; bottom: 0; pointer-events: none; z-index: 0; }
+      .bg-corner { width: 250px; min-width: 250px; }
+      .bg-tracks { flex-grow: 1; position: relative; }
+      
+      .rows-layer { position: relative; z-index: 1; }
+      .gantt-row { display: flex; border-bottom: 1px solid #f0f0f0; min-height: 55px; }
+      .row-label { position: sticky; left: 0; width: 250px; min-width: 250px; padding: 10px; background: rgba(255,255,255,0.95); border-right: 1px solid #e1e8ed; display: flex; flex-direction: column; justify-content: center; font-size: 0.9rem; z-index: 30; box-sizing: border-box; }
+      .row-track { flex-grow: 1; position: relative; padding: 10px 0; }
+      /* FIN ASCENSEUR */
+
       .bg-month-block { position: absolute; top: 0; height: 20px; text-align: center; font-size: 12px; font-weight: bold; background: #dae5f1; line-height: 20px; border-right: 1px solid #5a7b9c; border-bottom: 1px solid #5a7b9c; box-sizing: border-box;}
       .bg-week-block { position: absolute; top: 20px; height: 20px; text-align: center; font-size: 10px; color: #555; background: #eef2f5; line-height: 20px; cursor: help; border-right: 1px solid #ddd; box-sizing: border-box; }
       
-      .bg-layer { position: absolute; top: 40px; left: 250px; right: 0; bottom: 0; pointer-events: none; z-index: 0; }
       .bg-weekend { position: absolute; height: 100%; background: rgba(0,0,0,0.03); }
       .bg-holiday { position: absolute; height: 100%; background: rgba(46,204,113,0.15); }
       .bg-month-line { position: absolute; height: 100%; width: 1px; background: #999; }
       .bg-week-line { position: absolute; height: 100%; width: 1px; background: #eee; z-index: -1; }
       .bg-today { position: absolute; height: 100%; width: 2px; background: rgba(231, 76, 60, 0.8); z-index: 5; }
 
-      .rows-layer { position: relative; z-index: 1; padding-top: 40px; }
-      .gantt-row { display: flex; border-bottom: 1px solid #f0f0f0; min-height: 55px; }
-      .row-label { width: 250px; min-width: 250px; padding: 10px; background: rgba(255,255,255,0.9); border-right: 1px solid #e1e8ed; display: flex; flex-direction: column; justify-content: center; font-size: 0.9rem; z-index: 10; box-sizing: border-box; }
       .badge { font-size: 0.7rem; color: #888; margin-top: 4px; }
-      .row-track { flex-grow: 1; position: relative; padding: 10px 0; }
-      
       .bar { position: absolute; height: 18px; border-radius: 3px; color: white; font-size: 0.7rem; font-weight: 600; display: flex; align-items: center; padding: 0 5px; overflow: hidden; white-space: nowrap; box-shadow: 0 1px 3px rgba(0,0,0,0.2); cursor: help; }
       .bar-com { background-color: #9b59b6; top: 0px; height: 14px; font-size: 0.6rem; }
       .bar-ins { background-color: #3498db; top: 16px; height: 14px; font-size: 0.6rem; }
@@ -256,9 +263,17 @@ function generateFloatingGantt(events, holidays) {
       <div class="nav-tabs"><a href="/" class="active">Vue Gantt</a> <a href="/grille">Vue Grille (Excel)</a></div>
       <div class="controls"><strong>Filtres:</strong> ${htmlFiltres}</div>
       <div class="gantt-container">
-        <div class="timeline-header">${timelineHTML}</div>
-        <div class="bg-layer">${bgHTML}</div>
-        <div class="rows-layer">${rowsHTML}</div>
+        <div class="gantt-wrapper">
+          <div class="timeline-header">
+            <div class="header-corner">Événements</div>
+            <div class="header-tracks">${timelineHTML}</div>
+          </div>
+          <div class="bg-layer">
+            <div class="bg-corner"></div>
+            <div class="bg-tracks">${bgHTML}</div>
+          </div>
+          <div class="rows-layer">${rowsHTML}</div>
+        </div>
       </div>
       <div class="legend">
         <div class="leg-item"><div class="box" style="background:#9b59b6"></div> Com</div>
@@ -379,7 +394,6 @@ function generateGridHTML(events, holidays) {
       .th-jour .dow { font-size: 0.65rem; color: #555; }
       .first-day { border-left: 2px solid #2c3e50; }
       
-      /* L'ordre est important ici, le td-jour hol colore bien la case complète */
       .wknd { background-color: rgba(0,0,0,0.03) !important; }
       td.td-jour.hol, th.th-jour.hol { background-color: rgba(46,204,113,0.15) !important; }
       .today { border-left: 2px solid red !important; border-right: 2px solid red !important; background-color: rgba(231,76,60,0.1) !important; }
